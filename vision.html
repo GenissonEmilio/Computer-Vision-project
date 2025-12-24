@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Advanced Gesture Particle System</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: 'Courier New', Courier, monospace; }
+        canvas { display: block; }
+        #video-container {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 200px;
+            height: 150px;
+            z-index: 10;
+            opacity: 0.8;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 2px solid #333;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+            transform: scaleX(-1); /* Mirror feedback */
+        }
+        #videoElement { width: 100%; height: 100%; object-fit: cover; }
+        #ui {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            color: rgba(255, 255, 255, 0.9);
+            text-align: right;
+            pointer-events: none;
+            text-shadow: 0 0 5px rgba(0,0,0,0.8);
+        }
+        h1 { margin: 0; font-size: 1.5rem; text-transform: uppercase; letter-spacing: 4px; border-bottom: 1px solid #444; padding-bottom: 10px; margin-bottom: 10px;}
+        p { font-size: 0.9rem; color: #bbb; margin: 5px 0; }
+        .highlight { color: #00ffff; font-weight: bold; }
+        .status-box {
+            margin-top: 15px;
+            padding: 10px;
+            background: rgba(0, 20, 20, 0.8);
+            border: 1px solid #00aaaa;
+            border-radius: 4px;
+            font-size: 0.8rem;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="video-container">
+        <video id="videoElement"></video>
+    </div>
+
+    <div id="ui">
+        <h1>Quantum Particles</h1>
+        <p>Current Matrix: <span id="shapeName" class="highlight">Galaxy</span></p>
+        <div class="status-box">
+            <p>Right Hand: <span class="highlight">Rotate & Color</span></p>
+            <p>Left Hand: <span class="highlight">Chaos & Time</span></p>
+            <p>Index Finger: <span class="highlight">Gravity Magnet</span></p>
+            <p>Fist Clench: <span class="highlight" style="color:#ff3366">IMPLOSION</span></p>
+            <p>Pinch: <span class="highlight">Next Shape</span></p>
+        </div>
+        <p id="debug" style="margin-top:10px; opacity: 0.5;">Waiting for camera...</p>
+    </div>
+
+<script>
+    /**
+     * CONFIGURATION & STATE
+     */
+    const PARTICLE_COUNT = 20000;
+    const PARTICLE_SIZE = 0.12;
+    const MORPH_SPEED = 0.04;
+    
+    // Physics Config
+    const ATTRACTION_RADIUS = 8.0; // Distance for finger magnet
+    const ATTRACTION_FORCE = 0.8;  // Strength of magnet
+    
+    // Global Logic
+    let currentShapeIndex = 0;
+    let isPinching = false;
+    let isImploding = false; // Fist gesture state
+    let lastPinchTime = 0;
+    
+    // Interaction State
+    const handsState = {
+        left: { x: 0, y: 0, detected: false, pinch: false, fist: false },
+        right: { x: 0, y: 0, detected: false, pinch: false, fist: false }
+    };
+
+    const shapes = ['Galaxy', 'DNA Helix', 'Quantum Cube', 'Sphere', 'Torus'];
+
+    /**
+     * THREE.JS BOILERPLATE
+     */
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x000000, 0.02); // Add depth fog
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.z = 40;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Cap pixel ratio for performance
+    document.body.appendChild(renderer.domElement);
+
+    /**
+     * PARTICLE SYSTEM SETUP
+     */
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(PARTICLE_COUNT * 3);
+    const targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+    const colors = new Float32Array(PARTICLE_COUNT * 3);
+    const initialPositions = new Float32Array(PARTICLE_COUNT * 3); // To remember relative spots
+
+    // Initialize
+    const colorObj = new THREE.Color();
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+        const x = (Math.random() - 0.5) * 100;
+        const y = (Math.random() - 0.5) * 100;
+        const z = (Math.random() - 0.5) * 100;
+        
+        positions[i*3] = x; positions[i*3+1] = y; positions[i*3+2] = z;
+        targetPositions[i*3] = x; targetPositions[i*3+1] = y; targetPositions[i*3+2] = z;
+        
+        colorObj.setHSL(Math.random(), 0.8, 0.5);
+        colors[i*3] = colorObj.r; colors[i*3+1] = colorObj.g; colors[i*3+2] = colorObj.b;
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const material = new THREE.PointsMaterial({
+        size: PARTICLE_SIZE,
+        vertexColors: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        transparent: true,
+        opacity: 0.9,
+    });
+
+    const particles = new THREE.Points(geometry, material);
+    scene.add(particles);
+
+    /**
+     * COMPLEX SHAPE GENERATORS
+     */
+    function getSpherePoint(i) {
+        const r = 12;
+        const phi = Math.acos(-1 + (2 * i) / PARTICLE_COUNT);
+        const theta = Math.sqrt(PARTICLE_COUNT * Math.PI) * phi;
+        return {
+            x: r * Math.cos(theta) * Math.sin(phi),
+            y: r * Math.sin(theta) * Math.sin(phi),
+            z: r * Math.cos(phi)
+        };
+    }
+
+    function getGalaxyPoint(i) {
+        // Spiral Galaxy Formula
+        const branches = 3;
+        const spin = i / PARTICLE_COUNT;
+        const radius = Math.pow(Math.random(), 1.5) * 20; // Concentrate in center
+        const spinAngle = radius * 0.8 + (Math.PI * 2 / branches) * (i % branches);
+        const randomX = Math.random() * 0.5; // Scatter
+        const randomY = Math.random() * 0.5;
+        const randomZ = Math.random() * 0.5;
+        
+        return {
+            x: Math.cos(spinAngle) * radius + randomX,
+            y: (Math.random() - 0.5) * (4 - radius * 0.1), // Flattens at edges
+            z: Math.sin(spinAngle) * radius + randomZ
+        };
+    }
+
+    function getDNAPoint(i) {
+        // Double Helix
+        const len = 30;
+        const radius = 4;
+        const turns = 4;
+        const y = (i / PARTICLE_COUNT) * len - (len / 2);
+        const angle = (y / len) * Math.PI * 2 * turns;
+        
+        // Split into two strands
+        const strand = i % 2 === 0 ? 0 : Math.PI;
+        
+        return {
+            x: radius * Math.cos(angle + strand),
+            y: y,
+            z: radius * Math.sin(angle + strand)
+        };
+    }
+
+    function getCubePoint(i) {
+        const side = 16;
+        const half = side / 2;
+        // Random point inside volume vs Surface? Let's do structured grid.
+        // Approx cubic root to distribute evenly
+        const perSide = Math.floor(Math.cbrt(PARTICLE_COUNT));
+        const step = side / perSide;
+        
+        const ix = i % perSide;
+        const iy = Math.floor((i / perSide)) % perSide;
+        const iz = Math.floor(i / (perSide * perSide));
+        
+        return {
+            x: ix * step - half + (Math.random()*0.5),
+            y: iy * step - half + (Math.random()*0.5),
+            z: iz * step - half + (Math.random()*0.5)
+        };
+    }
+
+    function getTorusPoint(i) {
+        const u = Math.random() * Math.PI * 2;
+        const v = Math.random() * Math.PI * 2;
+        const R = 10;
+        const r = 3;
+        return {
+            x: (R + r * Math.cos(v)) * Math.cos(u),
+            y: (R + r * Math.cos(v)) * Math.sin(u),
+            z: r * Math.sin(v)
+        };
+    }
+
+    function setShape(index) {
+        document.getElementById('shapeName').innerText = shapes[index];
+        const generator = [getGalaxyPoint, getDNAPoint, getCubePoint, getSpherePoint, getTorusPoint][index];
+        
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const p = generator(i);
+            targetPositions[i * 3]     = p.x;
+            targetPositions[i * 3 + 1] = p.y;
+            targetPositions[i * 3 + 2] = p.z;
+        }
+    }
+
+    function nextShape() {
+        currentShapeIndex = (currentShapeIndex + 1) % shapes.length;
+        setShape(currentShapeIndex);
+        // Explosion effect on change
+        isImploding = false; 
+    }
+
+    // Start with Galaxy
+    setShape(0);
+
+    /**
+     * MEDIAPIPE LOGIC
+     */
+    const videoElement = document.getElementById('videoElement');
+    
+    // Helper: Detect Fist (Distance of finger tips to wrist)
+    function isHandFist(landmarks) {
+        const wrist = landmarks[0];
+        const tips = [landmarks[8], landmarks[12], landmarks[16], landmarks[20]];
+        let avgDist = 0;
+        for(let tip of tips) {
+            const d = Math.sqrt(Math.pow(tip.x - wrist.x, 2) + Math.pow(tip.y - wrist.y, 2));
+            avgDist += d;
+        }
+        return (avgDist / 4) < 0.25; // Threshold for fist
+    }
+
+    function onResults(results) {
+        // Reset states
+        handsState.left.detected = false;
+        handsState.right.detected = false;
+        let globalFist = false;
+
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            
+            results.multiHandLandmarks.forEach((landmarks, index) => {
+                // Determine Left/Right based on handedness or index
+                // MediaPipe 'Left' is usually your actual right hand in mirrored video, 
+                // but let's keep it simple: Index 0 is primary, Index 1 is secondary
+                // Or better: check classification if available. For this demo, we assume:
+                // Hand 0 -> Logic for Right, Hand 1 -> Logic for Left (if 2 hands)
+                
+                const label = results.multiHandedness[index].label; 
+                // Note: MP Selfie mode: 'Left' label is actually user's Right hand visually.
+                const isRightHand = label === 'Left'; // Mirrored logic
+                
+                const targetHand = isRightHand ? handsState.right : handsState.left;
+                
+                targetHand.detected = true;
+                
+                // Track Index Tip (Normalized coordinates)
+                targetHand.x = (landmarks[8].x - 0.5) * 2;
+                targetHand.y = -(landmarks[8].y - 0.5) * 2;
+                
+                // Pinch Detection (Thumb tip to Index tip)
+                const dx = landmarks[8].x - landmarks[4].x;
+                const dy = landmarks[8].y - landmarks[4].y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                targetHand.pinch = dist < 0.05;
+
+                // Fist Detection
+                targetHand.fist = isHandFist(landmarks);
+                if(targetHand.fist) globalFist = true;
+            });
+        }
+        
+        isImploding = globalFist;
+        
+        // Handle Trigger (Shared logic for pinch switch)
+        const anyPinch = handsState.right.pinch || handsState.left.pinch;
+        if (anyPinch) {
+            const now = Date.now();
+            if (!isPinching && now - lastPinchTime > 1000) {
+                nextShape();
+                lastPinchTime = now;
+                isPinching = true;
+                document.getElementById('ui').style.color = '#ff00ff';
+                setTimeout(()=>document.getElementById('ui').style.color = 'white', 200);
+            }
+        } else {
+            isPinching = false;
+        }
+
+        // Debug UI
+        const status = [];
+        if(handsState.right.detected) status.push("RIGHT detected");
+        if(handsState.left.detected) status.push("LEFT detected");
+        if(isImploding) status.push("IMPLOSION!");
+        document.getElementById('debug').innerHTML = status.join(" | ");
+    }
+
+    const hands = new Hands({locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+    }});
+
+    hands.setOptions({
+        maxNumHands: 2, // Enable two hands
+        modelComplexity: 1,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    hands.onResults(onResults);
+
+    const cameraUtils = new Camera(videoElement, {
+        onFrame: async () => {
+            await hands.send({image: videoElement});
+        },
+        width: 320,
+        height: 240
+    });
+    cameraUtils.start();
+
+    /**
+     * MAIN ANIMATION LOOP
+     */
+    const clock = new THREE.Clock();
+    
+    // Mouse fallback for debugging without camera
+    const mouse = { x: 999, y: 999 };
+    window.addEventListener('mousemove', (e) => {
+        mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    });
+
+    function animate() {
+        requestAnimationFrame(animate);
+
+        const delta = clock.getDelta();
+        const time = clock.getElapsedTime();
+        const positionsAttr = geometry.attributes.position;
+        const colorsAttr = geometry.attributes.color;
+
+        // --- Interaction Logic ---
+        
+        // 1. Rotation (Right Hand X)
+        const rotSpeed = handsState.right.detected ? handsState.right.x * 2 : 0.2;
+        particles.rotation.y += rotSpeed * delta;
+        particles.rotation.z += 0.05 * delta;
+
+        // 2. Chaos/Vibration (Left Hand Y)
+        let chaos = 0.05; // Base noise
+        if (handsState.left.detected) {
+            chaos += Math.abs(handsState.left.y) * 0.5; // Up to 0.55
+        }
+
+        // 3. Time Speed (Left Hand X)
+        const timeScale = handsState.left.detected ? (1 + handsState.left.x) : 1;
+
+        // 4. Color Shift (Right Hand Y)
+        const colorShift = handsState.right.detected ? handsState.right.y : 0;
+
+        // Attractor Positions (World Space approx)
+        // Map normalized hand coords (-1 to 1) to approximate World Coords (visible frustum at z=0 is approx width 50)
+        const attractors = [];
+        
+        if (handsState.right.detected) attractors.push(new THREE.Vector3(handsState.right.x * 25, handsState.right.y * 15, 0));
+        if (handsState.left.detected) attractors.push(new THREE.Vector3(handsState.left.x * 25, handsState.left.y * 15, 0));
+        // Add mouse as fallback attractor
+        if (!handsState.right.detected && !handsState.left.detected) {
+            attractors.push(new THREE.Vector3(mouse.x * 25, mouse.y * 15, 0));
+        }
+
+        // --- Particle Update Loop ---
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const px = i * 3;
+            const py = i * 3 + 1;
+            const pz = i * 3 + 2;
+
+            let tx = targetPositions[px];
+            let ty = targetPositions[py];
+            let tz = targetPositions[pz];
+
+            // A. IMPLOSION LOGIC (Fist)
+            // If imploding, target is (0,0,0)
+            if (isImploding) {
+                tx = 0; ty = 0; tz = 0;
+            }
+
+            // B. STANDARD MORPH
+            // Move current pos towards target
+            positionsAttr.array[px] += (tx - positionsAttr.array[px]) * MORPH_SPEED * timeScale;
+            positionsAttr.array[py] += (ty - positionsAttr.array[py]) * MORPH_SPEED * timeScale;
+            positionsAttr.array[pz] += (tz - positionsAttr.array[pz]) * MORPH_SPEED * timeScale;
+
+            // C. NOISE / CHAOS
+            // Add sine wave vibration
+            positionsAttr.array[px] += Math.sin(time * 3 * timeScale + py) * chaos;
+            positionsAttr.array[py] += Math.cos(time * 2 * timeScale + px) * chaos;
+
+            // D. INTERACTIVE PHYSICS (MAGNET)
+            // Check distance to attractors
+            const currentPos = new THREE.Vector3(positionsAttr.array[px], positionsAttr.array[py], positionsAttr.array[pz]);
+            
+            for (let att of attractors) {
+                const dist = currentPos.distanceTo(att);
+                if (dist < ATTRACTION_RADIUS && !isImploding) {
+                    // Pull towards finger
+                    const force = (1 - dist / ATTRACTION_RADIUS) * ATTRACTION_FORCE;
+                    positionsAttr.array[px] += (att.x - positionsAttr.array[px]) * force;
+                    positionsAttr.array[py] += (att.y - positionsAttr.array[py]) * force;
+                    positionsAttr.array[pz] += (att.z - positionsAttr.array[pz]) * force;
+                }
+            }
+
+            // E. COLOR DYNAMICS
+            // Color based on distance from center + Hand Input
+            const distCenter = Math.sqrt(positionsAttr.array[px]**2 + positionsAttr.array[py]**2);
+            const baseHue = (time * 0.05 + distCenter * 0.02) % 1;
+            
+            colorObj.setHSL((baseHue + colorShift * 0.5 + 1) % 1, 0.8, 0.6);
+            colorsAttr.array[px] = colorObj.r;
+            colorsAttr.array[py] = colorObj.g;
+            colorsAttr.array[pz] = colorObj.b;
+        }
+
+        positionsAttr.needsUpdate = true;
+        colorsAttr.needsUpdate = true;
+
+        renderer.render(scene, camera);
+    }
+
+    // Resize Handler
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    animate();
+
+</script>
+</body>
+</html>
